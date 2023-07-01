@@ -145,6 +145,7 @@ unsigned char scenedata[MAPXSIZE*MAPYSIZE]={
 uint pwm_slice_num;
 
 void sound_on(uint16_t f){
+	f<<=1;
 	pwm_set_clkdiv_int_frac(pwm_slice_num, f>>4, f&15);
 	pwm_set_enabled(pwm_slice_num, true);
 }
@@ -1925,7 +1926,68 @@ void read_ini(void){
 	// Close file
 	f_close(&fpo);
 }
+#include "hardware/pll.h"
+#include "hardware/clocks.h"
 void main() {
+    // Before we touch PLLs, switch sys and ref cleanly away from their aux sources.
+    hw_clear_bits(&clocks_hw->clk[clk_sys].ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);
+    while (clocks_hw->clk[clk_sys].selected != 0x1)
+        tight_loop_contents();
+    hw_clear_bits(&clocks_hw->clk[clk_ref].ctrl, CLOCKS_CLK_REF_CTRL_SRC_BITS);
+    while (clocks_hw->clk[clk_ref].selected != 0x1)
+        tight_loop_contents();
+
+    /// \tag::pll_init[]
+    pll_init(pll_sys, 1, 1500 * MHZ, 3, 2);
+    pll_init(pll_usb, 1, 1200 * MHZ, 5, 5);
+    /// \end::pll_init[]
+
+    // Configure clocks
+    // CLK_REF = XOSC (12MHz) / 1 = 12MHz
+    clock_configure(clk_ref,
+                    CLOCKS_CLK_REF_CTRL_SRC_VALUE_XOSC_CLKSRC,
+                    0, // No aux mux
+                    12 * MHZ,
+                    12 * MHZ);
+
+    /// \tag::configure_clk_sys[]
+    // CLK SYS = PLL SYS (250MHz) / 1 = 250MHz
+    clock_configure(clk_sys,
+                    CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+                    250 * MHZ,
+                    250 * MHZ);
+    /// \end::configure_clk_sys[]
+
+    // CLK USB = PLL USB (48MHz) / 1 = 48MHz
+    clock_configure(clk_usb,
+                    0, // No GLMUX
+                    CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+                    48 * MHZ,
+                    48 * MHZ);
+
+    // CLK ADC = PLL USB (48MHZ) / 1 = 48MHz
+    clock_configure(clk_adc,
+                    0, // No GLMUX
+                    CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+                    48 * MHZ,
+                    48 * MHZ);
+
+    // CLK RTC = PLL USB (48MHz) / 1024 = 46875Hz
+    clock_configure(clk_rtc,
+                    0, // No GLMUX
+                    CLOCKS_CLK_RTC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+                    48 * MHZ,
+                    46875);
+
+    // CLK PERI = clk_sys. Used as reference clock for Peripherals. No dividers so just select and enable
+    // Normally choose clk_sys or clk_usb
+    clock_configure(clk_peri,
+                    0,
+                    CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+                    250 * MHZ,
+                    250 * MHZ);
+
     stdio_init_all();
 
 	// ボタン用GPIO設定
@@ -1948,7 +2010,7 @@ void main() {
 
 	// 液晶用ポート設定
 	// Enable SPI at 32 MHz and connect to GPIOs
-	spi_init(LCD_SPICH, 32000 * 1000);
+	spi_init(LCD_SPICH, 64000 * 1000);
 	gpio_set_function(LCD_SPI_RX, GPIO_FUNC_SPI);
 	gpio_set_function(LCD_SPI_TX, GPIO_FUNC_SPI);
 	gpio_set_function(LCD_SPI_SCK, GPIO_FUNC_SPI);
@@ -1963,11 +2025,12 @@ void main() {
 	gpio_put(LCD_RESET, 1);
 	gpio_set_dir(LCD_RESET, GPIO_OUT);
 
-	f_mount(&FatFs, "", 0);
+
+//	f_mount(&FatFs, "", 0);
 	lcd180turn=0;
 	button_rotation=1;
 	// Read MACHIKAP.INI
-	read_ini(); //MACHKAP.INIファイル読み込み
+//	read_ini(); //MACHKAP.INIファイル読み込み
 	init_graphic(); //液晶利用開始
 	LCD_WriteComm(0x37); //画面中央にするためスクロール設定
 	if(lcd180turn) LCD_WriteData2(320-272);
