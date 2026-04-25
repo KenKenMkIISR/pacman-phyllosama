@@ -1,4 +1,21 @@
-// パックマン（MachiKania type P版）with Raspberry Pi Pico by K.Tanaka
+/*----------------------------------------------------------------------------
+
+Copyright (C) 2026, KenKen, all right reserved.
+
+This program supplied herewith by KenKen is free software; you can
+redistribute it and/or modify it under the terms of the same license written
+here and only for non-commercial purpose.
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of FITNESS FOR A PARTICULAR
+PURPOSE. The copyright owner and contributors are NOT LIABLE for any damages
+caused by using this program.
+
+----------------------------------------------------------------------------*/
+// PACMAN for MachiKania type P with Raspberry Pi Pico by KenKen
 
 // LCD : ILI9341 (240x340) SPI I/F
 //  Pico         LCD
@@ -22,11 +39,15 @@
 // スピーカー GPIO28
 
 #include "pico/stdlib.h"
+#include "pico/multicore.h"
+#include "hardware/clocks.h"
+#include "hardware/vreg.h"
 #include "hardware/pwm.h"
 #include "hardware/spi.h"
 #include "LCDdriver.h"
 #include "graphlib.h"
 #include "pacman2.h"
+#include "usbkeyboard.h"
 #include <string.h>
 #include "ff.h"
 
@@ -141,11 +162,10 @@ unsigned char scenedata[MAPXSIZE*MAPYSIZE]={
 #define GETMAP(x,y) map[(y)*MAPXSIZE+(x)]
 #define SETMAP(x,y,d) map[(y)*MAPXSIZE+(x)]=(d)
 
-#define PWM_WRAP 4000 // 125MHz/31.25KHz
+#define PWM_WRAP 6400 // 200MHz/31.25KHz
 uint pwm_slice_num;
 
 void sound_on(uint16_t f){
-	f<<=1;
 	pwm_set_clkdiv_int_frac(pwm_slice_num, f>>4, f&15);
 	pwm_set_enabled(pwm_slice_num, true);
 }
@@ -165,7 +185,7 @@ unsigned char startkeycheck(unsigned short n){
 	uint64_t t=to_us_since_boot(get_absolute_time())%16667;
 	while(n--){
 		sleep_us(16667-t);
-		if(!gpio_get(GPIO_KEYSTART)){
+		if(!gpio_get(GPIO_KEYSTART) || usbkb_keystatus[VK_RETURN] || usbkb_keystatus[VK_SEPARATOR]){
 			return 1;
 		}
 		t=0;
@@ -231,57 +251,7 @@ void putbmpmn3(int x,int y,unsigned char m,unsigned char n,const unsigned char b
 // unsigned char bmp[m*n]配列に、単純にカラー番号を並べる
 // カラー番号が0の部分は透明色として扱う
 {
-	int i,j;
-	int skip;
-	static uint8_t lcddatabuf[64];
-	uint8_t *lcdbufp;
-	const unsigned char *p;
-	if(x<=-m || x>=MAPXSIZE*8 || y<=-n || y>=MAPYSIZE*8) return; //画面外
-	if(y<0){ //画面上部に切れる場合
-		i=0;
-		p=bmp-y*m;
-	}
-	else{
-		i=y;
-		p=bmp;
-	}
-	for(;i<y+n;i++){
-		if(i>=MAPYSIZE*8) return; //画面下部に切れる場合
-		if(x<0){ //画面左に切れる場合は残る部分のみ描画
-			j=0;
-			p+=-x;
-		}
-		else{
-			j=x;
-		}
-		skip=1;
-		lcdbufp=lcddatabuf;
-		for(;j<x+m;j++){
-			if(j>=MAPXSIZE*8){ //画面右に切れる場合
-				p+=x+m-j;
-				break;
-			}
-			if(*p!=0){ //カラー番号が0の場合、透明として処理
-				if(skip){
-					LCD_SetCursor(j,i);
-					skip=0;
-				}
-				*lcdbufp++=palette[*p]>>8;
-				*lcdbufp++=(uint8_t)palette[*p];
-			}
-			else{
-				skip=1;
-				if(lcdbufp!=lcddatabuf){
-					LCD_WriteDataN(lcddatabuf,lcdbufp-lcddatabuf);
-					lcdbufp=lcddatabuf;
-				}
-			}
-			p++;
-		}
-		if(lcdbufp!=lcddatabuf){
-			LCD_WriteDataN(lcddatabuf,lcdbufp-lcddatabuf);
-		}
-	}
+	putbmpmn2(x,y,m,n,bmp,0,0,MAPXSIZE*8-1,MAPYSIZE*8-1);
 }
 void putpacman(void){
 	//パックマンの表示
@@ -539,6 +509,12 @@ void keycheck()
 			if(k & KEYRIGHT) k_|=KEYDOWN;
 			k=k_;
 	}
+	if(usbkb_keystatus[VK_RETURN] || usbkb_keystatus[VK_SEPARATOR]) k|=KEYSTART;
+	if(usbkb_keystatus[VK_SPACE]) k|=KEYFIRE;
+	if(usbkb_keystatus[VK_UP]) k|=KEYUP;
+	if(usbkb_keystatus[VK_DOWN]) k|=KEYDOWN;
+	if(usbkb_keystatus[VK_LEFT]) k|=KEYLEFT;
+	if(usbkb_keystatus[VK_RIGHT]) k|=KEYRIGHT;
 	if(k==KEYUP && (x%8)==0){	//上ボタン
 		if(pacman.dir!=DIR_UP){
 			if(y>=8){
@@ -1921,72 +1897,22 @@ void read_ini(void){
 			button_rotation=1;
 		} else if (!strncmp(str,"NOROTATEBUTTONS",15)) {
 			button_rotation=0;
+		} else if (!strncmp(str,"LCDINVERT",9)) {
+			lcdinvert=1;
 		}
 	}
 	// Close file
 	f_close(&fpo);
 }
-#include "hardware/pll.h"
-#include "hardware/clocks.h"
+void core1_entry(void){
+	while(1){
+		usbkb_polling();
+		sleep_ms(10);
+	}
+}
 void main() {
-    // Before we touch PLLs, switch sys and ref cleanly away from their aux sources.
-    hw_clear_bits(&clocks_hw->clk[clk_sys].ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);
-    while (clocks_hw->clk[clk_sys].selected != 0x1)
-        tight_loop_contents();
-    hw_clear_bits(&clocks_hw->clk[clk_ref].ctrl, CLOCKS_CLK_REF_CTRL_SRC_BITS);
-    while (clocks_hw->clk[clk_ref].selected != 0x1)
-        tight_loop_contents();
-
-    /// \tag::pll_init[]
-    pll_init(pll_sys, 1, 1500 * MHZ, 3, 2);
-    pll_init(pll_usb, 1, 1200 * MHZ, 5, 5);
-    /// \end::pll_init[]
-
-    // Configure clocks
-    // CLK_REF = XOSC (12MHz) / 1 = 12MHz
-    clock_configure(clk_ref,
-                    CLOCKS_CLK_REF_CTRL_SRC_VALUE_XOSC_CLKSRC,
-                    0, // No aux mux
-                    12 * MHZ,
-                    12 * MHZ);
-
-    /// \tag::configure_clk_sys[]
-    // CLK SYS = PLL SYS (250MHz) / 1 = 250MHz
-    clock_configure(clk_sys,
-                    CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
-                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
-                    250 * MHZ,
-                    250 * MHZ);
-    /// \end::configure_clk_sys[]
-
-    // CLK USB = PLL USB (48MHz) / 1 = 48MHz
-    clock_configure(clk_usb,
-                    0, // No GLMUX
-                    CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
-                    48 * MHZ,
-                    48 * MHZ);
-
-    // CLK ADC = PLL USB (48MHZ) / 1 = 48MHz
-    clock_configure(clk_adc,
-                    0, // No GLMUX
-                    CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
-                    48 * MHZ,
-                    48 * MHZ);
-
-    // CLK RTC = PLL USB (48MHz) / 1024 = 46875Hz
-    clock_configure(clk_rtc,
-                    0, // No GLMUX
-                    CLOCKS_CLK_RTC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
-                    48 * MHZ,
-                    46875);
-
-    // CLK PERI = clk_sys. Used as reference clock for Peripherals. No dividers so just select and enable
-    // Normally choose clk_sys or clk_usb
-    clock_configure(clk_peri,
-                    0,
-                    CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
-                    250 * MHZ,
-                    250 * MHZ);
+	vreg_set_voltage(15); // Set core 1.30V
+	set_sys_clock_hz(200000000,false); // Set clock speed 200MHz
 
     stdio_init_all();
 
@@ -2008,34 +1934,21 @@ void main() {
 	// duty 50%
 	pwm_set_chan_level(pwm_slice_num, PWM_CHAN_A, PWM_WRAP/2);
 
-	// 液晶用ポート設定
-	// Enable SPI at 32 MHz and connect to GPIOs
-	spi_init(LCD_SPICH, 64000 * 1000);
-	gpio_set_function(LCD_SPI_RX, GPIO_FUNC_SPI);
-	gpio_set_function(LCD_SPI_TX, GPIO_FUNC_SPI);
-	gpio_set_function(LCD_SPI_SCK, GPIO_FUNC_SPI);
-	
-	gpio_init(LCD_CS);
-	gpio_put(LCD_CS, 1);
-	gpio_set_dir(LCD_CS, GPIO_OUT);
-	gpio_init(LCD_DC);
-	gpio_put(LCD_DC, 1);
-	gpio_set_dir(LCD_DC, GPIO_OUT);
-	gpio_init(LCD_RESET);
-	gpio_put(LCD_RESET, 1);
-	gpio_set_dir(LCD_RESET, GPIO_OUT);
-
-
-//	f_mount(&FatFs, "", 0);
-	lcd180turn=0;
-	button_rotation=1;
 	// Read MACHIKAP.INI
-//	read_ini(); //MACHKAP.INIファイル読み込み
-	init_graphic(); //液晶利用開始
+	f_mount(&FatFs, "", 0);
+	read_ini(); //MACHKAP.INIファイル読み込み
+
+	// LCD初期化
+	lcd_display_init();
 	LCD_WriteComm(0x37); //画面中央にするためスクロール設定
 	if(lcd180turn) LCD_WriteData2(320-272);
 	else LCD_WriteData2(272);
 
+	// USB keyboard初期化
+	lockkey=1; // 下位3ビットが<SCRLK><CAPSLK><NUMLK>
+	keytype=0; // 0：日本語109キー、1：英語104キー
+	usbkb_init();
+	multicore_launch_core1(core1_entry);
 
 	highscore=1000;
 	gameinit(); //ゲーム全体初期化
