@@ -73,7 +73,7 @@ caused by using this program.
 #define clearscreen() LCD_Clear(0)
 
 FATFS FatFs;
-int button_rotation;
+int button_rotation=0;
 _Character pacman,akabei,pinky,aosuke,guzuta; //各キャラクターの構造体
 _Music music; //演奏中の音楽構造体
 unsigned int score,highscore; //得点、ハイスコア
@@ -127,7 +127,7 @@ unsigned char musicdata2[]={6,6,255,2,6,6,255,2,6,8,3,4,1,4,6,2,255,2,6,12,10,16
 						12,8,11,8,9,8,6,8,9,8,6,16,254};
 //
 //マップ定義
-//壁とえさの配置 0x78～0x8e:壁、0x8f:何もなし（通路）、0x90:えさ、0x91:パワーえさ
+//壁とえさの配置 0x74～0x8e:壁、0x8f:何もなし（通路）、0x90:えさ、0x91:パワーえさ
 unsigned char scenedata[MAPXSIZE*MAPYSIZE]={
 	0x80,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x8a,0x8b,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x86,0x81,
 	0x85,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x7f,0x7d,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x87,
@@ -167,7 +167,7 @@ unsigned char scenedata[MAPXSIZE*MAPYSIZE]={
 #define SETMAP(x,y,d) map[(y)*MAPXSIZE+(x)]=(d)
 
 #define PWM_WRAP 6400 // 200MHz/31.25KHz
-uint pwm_slice_num;
+uint pwm_slice_num,pwm_channel_num;
 
 void sound_on(uint16_t f){
 	pwm_set_clkdiv_int_frac(pwm_slice_num, f>>4, f&15);
@@ -1955,9 +1955,10 @@ void main() {
 	// サウンド用PWM設定
 	gpio_set_function(SOUNDPORT, GPIO_FUNC_PWM);
 	pwm_slice_num = pwm_gpio_to_slice_num(SOUNDPORT);
+	pwm_channel_num = pwm_gpio_to_channel(SOUNDPORT);
 	pwm_set_wrap(pwm_slice_num, PWM_WRAP-1);
 	// duty 50%
-	pwm_set_chan_level(pwm_slice_num, PWM_CHAN_A, PWM_WRAP/2);
+	pwm_set_chan_level(pwm_slice_num, pwm_channel_num, PWM_WRAP/2);
 
 	// Read MACHIKAP.INI
 	f_mount(&FatFs, "", 0);
